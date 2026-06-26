@@ -24,6 +24,7 @@ from keyboards import (
     tasks_list_kb, cities_kb, settings_kb, task_detail_kb,
     CATEGORIES, REPEAT_TYPES, BACK_KB,
 )
+from parser import parse_task
 
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher()
@@ -127,17 +128,36 @@ async def load_pending_tasks():
             )
 
 
-def parse_time_from_text(text: str) -> tuple | None:
-    match = re.search(r"(\d{1,2})[:.](\d{2})", text)
-    if not match:
-        return None
-    h, m = int(match.group(1)), int(match.group(2))
-    if h > 23 or m > 59:
-        return None
-    clean = re.sub(r"(\d{1,2})[:.](\d{2})", "", text).strip()
-    clean = re.sub(r"^в\s+", "", clean, flags=re.IGNORECASE).strip()
-    clean = re.sub(r"\s+", " ", clean).strip(" ,-–:")
-    return f"{h:02d}:{m:02d}", clean
+async def create_task_from_message(message: Message, text: str, category: str = "other"):
+    result = parse_task(text)
+    if not result:
+        await message.answer(
+            "🤔 Напиши задачу с датой и временем:\n"
+            "  `29.06.2026 в 12:00 про зарплату`\n"
+            "  `завтра в 15:00 позвонить маме`\n"
+            "  `в 14:00 читать книгу`\n"
+            "  `через 30 минут кофе`\n\n"
+            "Или нажми кнопку 👇",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=main_menu_kb(),
+        )
+        return
+
+    remind_at, task_text = result
+    task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat(), category)
+    scheduler.add_job(
+        send_reminder, "date", run_date=remind_at,
+        args=[message.from_user.id, task_text, task_id],
+        id=f"task_{task_id}", replace_existing=True,
+    )
+    cat_label = CATEGORIES.get(category, "📌")
+    await message.answer(
+        f"✅ *Задача создана!*\n"
+        f"{cat_label} {task_text}\n"
+        f"⏰ {remind_at.strftime('%d.%m.%Y в %H:%M')}",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=main_menu_kb(),
+    )
 
 
 # ─── /start ───
@@ -148,8 +168,10 @@ async def cmd_start(message: Message, state: FSMContext):
     await message.answer(
         "👋 *Привет! Я TOMA — твой умный помощник.*\n\n"
         "📌 *Создание задач:* просто напиши\n"
-        "  `в 12:00 читать книгу`\n"
-        "  `напомни в 13:00 намаз зухр`\n\n"
+        "  `29.06.2026 в 12:00 про зарплату`\n"
+        "  `завтра в 15:00 позвонить маме`\n"
+        "  `в 14:00 читать книгу`\n"
+        "  `через 30 минут кофе`\n\n"
         "🕌 Намазы для любого города мира\n"
         "📋 Категории, повторы, статистика\n\n"
         "Нажми кнопку ниже 👇",
@@ -273,17 +295,9 @@ async def handle_task_text(message: Message, state: FSMContext):
     category = data.get("category", "other")
     text = message.text.strip()
 
-    parsed = parse_time_from_text(text)
-    if parsed:
-        time_str, task_text = parsed
-        if not task_text:
-            await message.answer("📝 Что нужно сделать? Укажи задачу после времени.")
-            return
-        h, m = map(int, time_str.split(":"))
-        now = datetime.now()
-        remind_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        if remind_at <= now:
-            remind_at += timedelta(days=1)
+    result = parse_task(text)
+    if result:
+        remind_at, task_text = result
         task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat(), category)
         scheduler.add_job(
             send_reminder, "date", run_date=remind_at,
@@ -302,11 +316,16 @@ async def handle_task_text(message: Message, state: FSMContext):
     else:
         await state.update_data(task_text=text)
         await message.answer(
-            f"📝 Задача: *{text}*\n\n⏰ Во сколько напомнить? Напиши время (например `14:00`)",
+            f"📝 Задача: *{text}*\n\n"
+            "⏰ Когда напомнить?\n"
+            "Напиши дату и время:\n"
+            "  `29.06.2026 в 12:00`\n"
+            "  `завтра в 15:00`\n"
+            "  `в 14:00`",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=BACK_KB,
         )
-        await state.set_state(TaskStates.waiting_city)  # reuse state for time
+        await state.set_state(TaskStates.waiting_city)
 
 
 # ─── Текст: время для задачи без времени ───
@@ -341,18 +360,15 @@ async def handle_time_input(message: Message, state: FSMContext):
     # Это ввод времени для задачи
     task_text = data.get("task_text", "")
     category = data.get("category", "other")
-    match = re.search(r"(\d{1,2})[:.](\d{2})", message.text)
-    if not match:
-        await message.answer("❌ Не могу распознать время. Напиши в формате `14:00`", parse_mode=ParseMode.MARKDOWN)
+    result = parse_task(f"{message.text} {task_text}")
+    if not result:
+        await message.answer(
+            "❌ Не могу распознать дату.\n"
+            "Попробуй: `29.06.2026 в 12:00` или `завтра в 15:00`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
-    h, m = int(match.group(1)), int(match.group(2))
-    if h > 23 or m > 59:
-        await message.answer("❌ Некорректное время.")
-        return
-    now = datetime.now()
-    remind_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
-    if remind_at <= now:
-        remind_at += timedelta(days=1)
+    remind_at, _ = result
     task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat(), category)
     scheduler.add_job(
         send_reminder, "date", run_date=remind_at,
@@ -534,9 +550,11 @@ async def cmd_help(message: Message):
         "/tasks — задачи\n"
         "/prayer — намазы\n"
         "/help — помощь\n\n"
-        "✏️ *Быстрое создание:*\n"
-        "`в 12:00 читать книгу`\n"
-        "`напомни в 15:30 позвонить`",
+        "✏️ *Создание задач:*\n"
+        "`29.06.2026 в 12:00 про зарплату`\n"
+        "`завтра в 15:00 позвонить`\n"
+        "`в 14:00 читать книгу`\n"
+        "`через 30 минут кофе`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_menu_kb(),
     )
@@ -548,39 +566,7 @@ async def handle_free_text(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state:
         return
-
-    text = message.text.strip()
-    parsed = parse_time_from_text(text)
-    if not parsed:
-        await message.answer(
-            "🤔 Напиши задачу с временем:\n`в 12:00 читать книгу`\n\nИли нажми кнопку 👇",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=main_menu_kb(),
-        )
-        return
-
-    time_str, task_text = parsed
-    if not task_text:
-        await message.answer("📝 Что нужно сделать?")
-        return
-
-    h, m = map(int, time_str.split(":"))
-    now = datetime.now()
-    remind_at = now.replace(hour=h, minute=m, second=0, microsecond=0)
-    if remind_at <= now:
-        remind_at += timedelta(days=1)
-
-    task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat())
-    scheduler.add_job(
-        send_reminder, "date", run_date=remind_at,
-        args=[message.from_user.id, task_text, task_id],
-        id=f"task_{task_id}", replace_existing=True,
-    )
-    await message.answer(
-        f"✅ *Задача создана!*\n📌 {task_text}\n⏰ {remind_at.strftime('%d.%m.%Y в %H:%M')}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_kb(),
-    )
+    await create_task_from_message(message, message.text.strip())
 
 
 async def on_startup():
