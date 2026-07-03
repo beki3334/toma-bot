@@ -7,6 +7,8 @@ def parse_task(text: str) -> tuple | None:
     if not text:
         return None
 
+    repeat_type = _extract_repeat_type(text)
+
     dt = _extract_datetime(text)
     if not dt:
         return None
@@ -15,7 +17,7 @@ def parse_task(text: str) -> tuple | None:
     if not task_text:
         return None
 
-    return dt, task_text
+    return dt, task_text, repeat_type
 
 
 def _extract_datetime(text: str) -> datetime | None:
@@ -54,6 +56,17 @@ def _extract_time(text: str) -> tuple[int, int] | None:
     return None
 
 
+def _extract_repeat_type(text: str) -> str | None:
+    text_lower = text.lower()
+    if re.search(r'кажд(?:ый|ой|ую|ое)\s+день|ежедневно|все\s+дни|постоянно', text_lower):
+        return "daily"
+    if re.search(r'кажд(?:ую|ой)\s+неделю|еженедельно|по\s+(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье| будням| выходным)', text_lower):
+        return "weekly"
+    if re.search(r'кажд(?:ый|ой|ое)\s+месяц|ежемесячно', text_lower):
+        return "monthly"
+    return None
+
+
 def _try_relative(text: str, now: datetime) -> datetime | None:
     time_part = _extract_time(text)
 
@@ -69,11 +82,11 @@ def _try_relative(text: str, now: datetime) -> datetime | None:
             return datetime.combine(base, datetime.min.time().replace(hour=time_part[0], minute=time_part[1]))
         return datetime.combine(base, datetime.min.time().replace(hour=9))
 
-    m = re.search(r'через\s+(\d+)\s*(минут[уы]?|час(?:ов|а)?|дн(?:ей|я)?)', text)
+    m = re.search(r'через\s+(\d+)\s*(мин(?:ут[уы]?)?|час(?:ов|а)?|дн(?:ей|я)?)', text)
     if m:
         n = int(m.group(1))
         unit = m.group(2)
-        if 'минут' in unit:
+        if 'мин' in unit:
             return now + timedelta(minutes=n)
         if 'час' in unit:
             return now + timedelta(hours=n)
@@ -185,6 +198,11 @@ def _try_time_only(text: str, now: datetime) -> datetime | None:
 
 def _clean_text(text: str, dt: datetime) -> str:
     t = text
+
+    t = re.sub(r'кажд(?:ый|ой|ую|ое)\s+день|ежедневно|все\s+дни|постоянно', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'кажд(?:ую|ой)\s+неделю|еженедельно', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'кажд(?:ый|ой|ое)\s+месяц|ежемесячно', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'по\s+(?:понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье|будням|выходным)', '', t, flags=re.IGNORECASE)
 
     t = re.sub(r'послезавтра', '', t, flags=re.IGNORECASE)
     t = re.sub(r'завтра', '', t, flags=re.IGNORECASE)

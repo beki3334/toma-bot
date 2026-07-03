@@ -186,3 +186,18 @@ async def get_stats(user_id: int) -> dict:
         )
         today_count = (await cursor.fetchone())[0]
         return {"pending": pending, "done": done, "today": today_count}
+
+
+async def get_last_task_id(user_id: int) -> int | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id FROM tasks WHERE user_id=? ORDER BY id DESC LIMIT 1", (user_id,)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+
+async def stop_task_repeat(task_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE tasks SET repeat_type='none' WHERE id=?", (task_id,))
+        await db.commit()

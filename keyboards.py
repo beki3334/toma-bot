@@ -27,9 +27,8 @@ def main_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🕌 Время намазов", callback_data="prayer_times"),
          InlineKeyboardButton(text="📊 Статистика", callback_data="stats")],
         [InlineKeyboardButton(text="🏙 Выбрать город", callback_data="set_city"),
-         InlineKeyboardButton(text="⚙ Настройки", callback_data="settings")],
-        [InlineKeyboardButton(text="📅 План на сегодня", callback_data="today_plan"),
-         InlineKeyboardButton(text="🗑 Очистить done", callback_data="clear_done")],
+         InlineKeyboardButton(text="📅 План на сегодня", callback_data="today_plan")],
+        [InlineKeyboardButton(text="🗑 Очистить done", callback_data="clear_done")],
     ])
 
 
@@ -90,22 +89,15 @@ def cities_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def settings_kb(user: dict) -> InlineKeyboardMarkup:
-    prayer_icon = "✅" if user.get("prayer_notifications") else "❌"
-    daily_icon = "✅" if user.get("daily_summary") else "❌"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{prayer_icon} Уведомления о намазах", callback_data="toggle_prayer")],
-        [InlineKeyboardButton(text=f"{daily_icon} Утренняя сводка (7:00)", callback_data="toggle_daily")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
-    ])
-
-
 def task_detail_kb(task: dict) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+    buttons = [
         [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"done_{task['id']}"),
          InlineKeyboardButton(text="🗑 Удалить", callback_data=f"del_{task['id']}")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="my_tasks")],
-    ])
+    ]
+    if task.get("repeat_type") and task["repeat_type"] != "none":
+        buttons.append([InlineKeyboardButton(text="⏹ Остановить повтор", callback_data=f"stoprep_{task['id']}")])
+    buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="my_tasks")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 BACK_KB = InlineKeyboardMarkup(inline_keyboard=[

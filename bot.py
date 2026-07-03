@@ -2,7 +2,7 @@ import re
 import logging
 from datetime import datetime, date, timedelta
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command, CommandStart
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
@@ -16,15 +16,17 @@ from database import (
     set_prayer_notifications, set_daily_summary,
     add_task, get_pending_tasks, get_today_tasks, get_tasks_by_category,
     get_all_pending_tasks, mark_done, delete_task, delete_all_done,
-    get_users_with_prayer, get_users_with_daily, get_stats,
+    get_users_with_prayer, get_users_with_daily, get_stats, get_last_task_id,
+    stop_task_repeat,
 )
 from prayer import get_prayer_times, get_prayer_message, find_city, CITIES
 from keyboards import (
     main_menu_kb, categories_kb, repeat_kb, confirm_kb,
-    tasks_list_kb, cities_kb, settings_kb, task_detail_kb,
+    tasks_list_kb, cities_kb, task_detail_kb,
     CATEGORIES, REPEAT_TYPES, BACK_KB,
 )
 from parser import parse_task
+from ai_handler import ask_ai, clear_history
 
 logging.basicConfig(level=logging.INFO)
 dp = Dispatcher()
@@ -39,25 +41,90 @@ class TaskStates(StatesGroup):
     waiting_city = State()
 
 
-async def send_reminder(user_id: int, text: str, task_id: int = None):
+async def send_reminder(user_id: int, text: str, task_id: int = None, repeat_type: str = None, category: str = None):
     try:
         kb = confirm_kb(task_id) if task_id else None
+        msg = _format_reminder(text, category, repeat_type)
         await bot.send_message(
             user_id,
-            f"🔔 *Напоминание:*\n{text}",
-            parse_mode=ParseMode.MARKDOWN,
+            msg,
+            parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
+        if repeat_type and task_id:
+            await _schedule_next_occurrence(user_id, text, task_id, repeat_type)
     except Exception as e:
         logging.error(f"Reminder fail {user_id}: {e}")
 
 
+def _format_reminder(text: str, category: str = None, repeat_type: str = None) -> str:
+    category_styles = {
+        "health": ("💪", "ЗДОРОВЬЕ", "━━━━━━━━━━━━━━━━━━━━"),
+        "study": ("📚", "УЧЁБА", "━━━━━━━━━━━━━━━━━━━━"),
+        "work": ("💼", "РАБОТА", "━━━━━━━━━━━━━━━━━━━━"),
+        "prayer": ("🕌", "НАМАЗ", "━━━━━━━━━━━━━━━━━━━━"),
+        "home": ("🏠", "ДОМ", "━━━━━━━━━━━━━━━━━━━━"),
+        "other": ("📌", "НАПОМИНАНИЕ", "━━━━━━━━━━━━━━━━━━━━"),
+    }
+    emoji, label, line = category_styles.get(category, category_styles["other"])
+    repeat_text = ""
+    if repeat_type == "daily":
+        repeat_text = "\n🔄 <i>Повтор: каждый день</i>"
+    elif repeat_type == "weekly":
+        repeat_text = "\n🔄 <i>Повтор: каждую неделю</i>"
+    elif repeat_type == "monthly":
+        repeat_text = "\n🔄 <i>Повтор: каждый месяц</i>"
+    return (
+        f"<pre>{emoji} {label} {emoji}\n{line}</pre>\n\n"
+        f"<b>{text}</b>"
+        f"{repeat_text}\n\n"
+        f"<i>⏰ Сейчас</i>"
+    )
+
+
+async def _schedule_next_occurrence(user_id: int, text: str, task_id: int, repeat_type: str):
+    now = datetime.now()
+    if repeat_type == "daily":
+        next_dt = now + timedelta(days=1)
+    elif repeat_type == "weekly":
+        next_dt = now + timedelta(weeks=1)
+    elif repeat_type == "monthly":
+        month = now.month + 1
+        year = now.year
+        if month > 12:
+            month = 1
+            year += 1
+        try:
+            next_dt = now.replace(year=year, month=month)
+        except ValueError:
+            next_dt = now + timedelta(days=30)
+    else:
+        return
+
+    await add_task(user_id, text, next_dt.isoformat(), "other", repeat_type)
+    new_task_id = await get_last_task_id(user_id)
+    if new_task_id:
+        scheduler.add_job(
+            send_reminder, "date", run_date=next_dt,
+            args=[user_id, text, new_task_id, repeat_type, "other"],
+            id=f"task_{new_task_id}", replace_existing=True,
+        )
+        logging.info(f"Recurring task scheduled: {repeat_type} next at {next_dt}")
+
+
 async def send_prayer_notification(user: dict, prayer_name_ru: str):
     try:
+        city = user.get('city', 'Москва')
+        msg = (
+            f"<pre>🕌 ВРЕМЯ НАМАЗА 🕌\n━━━━━━━━━━━━━━━━━━━━</pre>\n\n"
+            f"<b>{prayer_name_ru}</b>\n"
+            f"<i>📍 {city}</i>\n\n"
+            f"<i>Время молитвы наступило</i>"
+        )
         await bot.send_message(
             user["user_id"],
-            f"🕌 Время намаза *{prayer_name_ru}* ({user.get('city', 'Москва')})",
-            parse_mode=ParseMode.MARKDOWN,
+            msg,
+            parse_mode=ParseMode.HTML,
         )
     except Exception as e:
         logging.error(f"Prayer notify fail {user['user_id']}: {e}")
@@ -68,23 +135,37 @@ async def send_daily_summary(user: dict):
         tasks = await get_today_tasks(user["user_id"])
         if not tasks:
             return
-        lines = [f"☀️ *Доброе утро! План на сегодня ({user.get('city', '')}):*\n"]
+        city = user.get('city', '')
+        lines = [
+            f"<pre>☀️ ДОБРОЕ УТРО! ☀️\n━━━━━━━━━━━━━━━━━━━━</pre>\n",
+            f"<b>План на сегодня:</b>\n"
+        ]
         for t in tasks:
             remind = datetime.fromisoformat(t["remind_at"])
             cat = CATEGORIES.get(t["category"], "📌")
-            lines.append(f"  {cat} `{remind.strftime('%H:%M')}` — {t['text']}")
-        lines.append(f"\nВсего задач: {len(tasks)}")
+            lines.append(f"{cat} <code>{remind.strftime('%H:%M')}</code> — {t['text']}")
+        lines.append(f"\n<i>Всего задач: {len(tasks)}</i>")
         await bot.send_message(
             user["user_id"],
             "\n".join(lines),
-            parse_mode=ParseMode.MARKDOWN,
+            parse_mode=ParseMode.HTML,
         )
     except Exception as e:
         logging.error(f"Daily summary fail {user['user_id']}: {e}")
 
 
+_prayer_job_prefix = "prayer_"
+
+async def _remove_prayer_jobs(user_id: int):
+    user_id_str = str(user_id)
+    for job in scheduler.get_jobs():
+        if job.id.startswith(f"{_prayer_job_prefix}{user_id_str}_"):
+            scheduler.remove_job(job.id)
+
+
 async def schedule_prayer_for_user(user: dict):
     try:
+        await _remove_prayer_jobs(user["user_id"])
         times = await get_prayer_times(user["latitude"], user["longitude"])
         today = date.today().isoformat()
         for ru_name, time_str in times.items():
@@ -92,13 +173,11 @@ async def schedule_prayer_for_user(user: dict):
                 continue
             h, m = map(int, time_str.split(":"))
             job_id = f"prayer_{user['user_id']}_{ru_name}_{today}"
-            if scheduler.get_job(job_id):
-                continue
             scheduler.add_job(
                 send_prayer_notification,
                 "cron", hour=h, minute=m,
                 args=[user, ru_name],
-                id=job_id, replace_existing=True,
+                id=job_id,
             )
     except Exception as e:
         logging.error(f"Prayer schedule fail {user['user_id']}: {e}")
@@ -108,6 +187,7 @@ async def schedule_all_prayers():
     users = await get_users_with_prayer()
     for user in users:
         await schedule_prayer_for_user(user)
+    logging.info(f"Prayer scheduling completed for {len(users)} users")
 
 
 async def send_all_daily_summaries():
@@ -121,43 +201,22 @@ async def load_pending_tasks():
     for task in tasks:
         remind_at = datetime.fromisoformat(task["remind_at"])
         if remind_at > datetime.now():
+            repeat_type = task.get("repeat_type")
+            category = task.get("category", "other")
             scheduler.add_job(
                 send_reminder, "date", run_date=remind_at,
-                args=[task["user_id"], task["text"], task["id"]],
+                args=[task["user_id"], task["text"], task["id"], repeat_type, category],
                 id=f"task_{task['id']}", replace_existing=True,
             )
 
 
-async def create_task_from_message(message: Message, text: str, category: str = "other"):
-    result = parse_task(text)
-    if not result:
-        await message.answer(
-            "🤔 Напиши задачу с датой и временем:\n"
-            "  `29.06.2026 в 12:00 про зарплату`\n"
-            "  `завтра в 15:00 позвонить маме`\n"
-            "  `в 14:00 читать книгу`\n"
-            "  `через 30 минут кофе`\n\n"
-            "Или нажми кнопку 👇",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=main_menu_kb(),
-        )
-        return
-
-    remind_at, task_text = result
-    task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat(), category)
-    scheduler.add_job(
-        send_reminder, "date", run_date=remind_at,
-        args=[message.from_user.id, task_text, task_id],
-        id=f"task_{task_id}", replace_existing=True,
-    )
-    cat_label = CATEGORIES.get(category, "📌")
-    await message.answer(
-        f"✅ *Задача создана!*\n"
-        f"{cat_label} {task_text}\n"
-        f"⏰ {remind_at.strftime('%d.%m.%Y в %H:%M')}",
-        parse_mode=ParseMode.MARKDOWN,
-        reply_markup=main_menu_kb(),
-    )
+async def prayer_times_kb(user: dict) -> InlineKeyboardMarkup:
+    icon = "🟢" if user.get("prayer_notifications") else "⚪"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"{icon} Уведомления: {'ВКЛ' if user.get('prayer_notifications') else 'ВЫКЛ'}", callback_data="toggle_prayer")],
+        [InlineKeyboardButton(text="🏙 Сменить город", callback_data="set_city")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="main_menu")],
+    ])
 
 
 # ─── /start ───
@@ -166,15 +225,14 @@ async def cmd_start(message: Message, state: FSMContext):
     await register_user(message.from_user.id)
     await state.clear()
     await message.answer(
-        "👋 *Привет! Я TOMA — твой умный помощник.*\n\n"
-        "📌 *Создание задач:* просто напиши\n"
-        "  `29.06.2026 в 12:00 про зарплату`\n"
-        "  `завтра в 15:00 позвонить маме`\n"
-        "  `в 14:00 читать книгу`\n"
-        "  `через 30 минут кофе`\n\n"
-        "🕌 Намазы для любого города мира\n"
-        "📋 Категории, повторы, статистика\n\n"
-        "Нажми кнопку ниже 👇",
+        "👋 *Привет! Я TOMA — твой ИИ-агент.*\n\n"
+        "Я могу:\n"
+        "• Отвечать на любые вопросы\n"
+        "• Создавать задачи и напоминания\n"
+        "• Показывать время намазов\n"
+        "• Составлять планы тренировок\n"
+        "• Помогать с учёбой и делами\n\n"
+        "Просто напиши мне что нужно 👇",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_menu_kb(),
     )
@@ -216,14 +274,15 @@ async def cb_task_detail(cb: CallbackQuery):
         return
     remind = datetime.fromisoformat(task["remind_at"])
     cat = CATEGORIES.get(task["category"], "📌")
-    rep = REPEAT_TYPES.get(task.get("repeat_type", "none"), "")
+    repeat_type = task.get("repeat_type")
+    repeat_labels = {"daily": "🔄 Каждый день", "weekly": "🔄 Каждую неделю", "monthly": "🔄 Каждый месяц"}
     text = (
         f"*{cat} Задача #{task['id']}*\n\n"
         f"📝 {task['text']}\n"
         f"⏰ {remind.strftime('%d.%m.%Y в %H:%M')}\n"
     )
-    if rep and rep != "Без повтора":
-        text += f"🔄 {rep}\n"
+    if repeat_type and repeat_type in repeat_labels:
+        text += f"{repeat_labels[repeat_type]}\n"
     await cb.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=task_detail_kb(task))
     await cb.answer()
 
@@ -264,6 +323,26 @@ async def cb_delete(cb: CallbackQuery):
     await cb_my_tasks(cb)
 
 
+# ─── Inline: Остановить повтор ───
+@router.callback_query(F.data.startswith("stoprep_"))
+async def cb_stop_repeat(cb: CallbackQuery):
+    task_id = int(cb.data.split("_")[1])
+    await stop_task_repeat(task_id)
+    await cb.answer("⏹ Повтор остановлен", show_alert=True)
+    tasks = await get_pending_tasks(cb.from_user.id)
+    task = next((t for t in tasks if t["id"] == task_id), None)
+    if task:
+        remind = datetime.fromisoformat(task["remind_at"])
+        cat = CATEGORIES.get(task["category"], "📌")
+        text = (
+            f"*{cat} Задача #{task['id']}*\n\n"
+            f"📝 {task['text']}\n"
+            f"⏰ {remind.strftime('%d.%m.%Y в %H:%M')}\n"
+            f"🔄 Повтор остановлен\n"
+        )
+        await cb.message.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=task_detail_kb(task))
+
+
 # ─── Inline: Новая задача — выбор категории ───
 @router.callback_query(F.data == "new_task")
 async def cb_new_task(cb: CallbackQuery, state: FSMContext):
@@ -278,9 +357,10 @@ async def cb_category(cb: CallbackQuery, state: FSMContext):
     await state.update_data(category=category)
     await cb.message.edit_text(
         f"📝 *Категория: {CATEGORIES.get(category, '📌')}*\n\n"
-        "Напиши задачу в формате:\n"
-        "`в 14:00 сделать домашку`\n\n"
-        "Или просто текст — я спрошу время отдельно.",
+        "Напиши задачу с датой и временем:\n"
+        "`завтра в 15:00 позвонить маме`\n"
+        "`через 10 мин тренировка`\n"
+        "`в 14:00 читать книгу`",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=BACK_KB,
     )
@@ -297,35 +377,35 @@ async def handle_task_text(message: Message, state: FSMContext):
 
     result = parse_task(text)
     if result:
-        remind_at, task_text = result
-        task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat(), category)
+        remind_at, task_text, repeat_type = result
+        task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat(), category, repeat_type)
         scheduler.add_job(
             send_reminder, "date", run_date=remind_at,
-            args=[message.from_user.id, task_text, task_id],
+            args=[message.from_user.id, task_text, task_id, repeat_type, category],
             id=f"task_{task_id}", replace_existing=True,
         )
         cat_label = CATEGORIES.get(category, "📌")
+        repeat_msg = ""
+        if repeat_type == "daily":
+            repeat_msg = "\n🔄 Повтор: каждый день"
+        elif repeat_type == "weekly":
+            repeat_msg = "\n🔄 Повтор: каждую неделю"
+        elif repeat_type == "monthly":
+            repeat_msg = "\n🔄 Повтор: каждый месяц"
         await message.answer(
             f"✅ *Задача создана!*\n"
             f"{cat_label} {task_text}\n"
-            f"⏰ {remind_at.strftime('%d.%m.%Y в %H:%M')}",
+            f"⏰ {remind_at.strftime('%d.%m.%Y в %H:%M')}{repeat_msg}",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_menu_kb(),
         )
         await state.clear()
     else:
-        await state.update_data(task_text=text)
         await message.answer(
-            f"📝 Задача: *{text}*\n\n"
-            "⏰ Когда напомнить?\n"
-            "Напиши дату и время:\n"
-            "  `29.06.2026 в 12:00`\n"
-            "  `завтра в 15:00`\n"
-            "  `в 14:00`",
+            "❌ Не могу распознать дату.\n"
+            "Попробуй: `завтра в 15:00` или `через 10 мин`",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=BACK_KB,
         )
-        await state.set_state(TaskStates.waiting_city)
 
 
 # ─── Текст: время для задачи без времени ───
@@ -333,7 +413,6 @@ async def handle_task_text(message: Message, state: FSMContext):
 async def handle_time_input(message: Message, state: FSMContext):
     data = await state.get_data()
 
-    # Если это ввод города
     if data.get("awaiting_city"):
         city_name = message.text.strip()
         city = find_city(city_name)
@@ -349,44 +428,39 @@ async def handle_time_input(message: Message, state: FSMContext):
         if user and user.get("prayer_notifications"):
             await schedule_prayer_for_user(user)
         await message.answer(
-            f"✅ Город: *{city_name}*\n"
-            f"🕌 Намазы будут для этого города.",
+            f"✅ Город: *{city_name}*\n🕌 Намазы будут для этого города.",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=main_menu_kb(),
         )
         await state.clear()
         return
 
-    # Это ввод времени для задачи
     task_text = data.get("task_text", "")
     category = data.get("category", "other")
     result = parse_task(f"{message.text} {task_text}")
     if not result:
         await message.answer(
-            "❌ Не могу распознать дату.\n"
-            "Попробуй: `29.06.2026 в 12:00` или `завтра в 15:00`",
+            "❌ Не могу распознать дату.\nПопробуй: `29.06.2026 в 12:00` или `завтра в 15:00`",
             parse_mode=ParseMode.MARKDOWN,
         )
         return
-    remind_at, _ = result
-    task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat(), category)
+    remind_at, _, repeat_type = result
+    task_id = await add_task(message.from_user.id, task_text, remind_at.isoformat(), category, repeat_type)
     scheduler.add_job(
         send_reminder, "date", run_date=remind_at,
-        args=[message.from_user.id, task_text, task_id],
+        args=[message.from_user.id, task_text, task_id, repeat_type, category],
         id=f"task_{task_id}", replace_existing=True,
     )
     cat_label = CATEGORIES.get(category, "📌")
     await message.answer(
-        f"✅ *Задача создана!*\n"
-        f"{cat_label} {task_text}\n"
-        f"⏰ {remind_at.strftime('%d.%m.%Y в %H:%M')}",
+        f"✅ *Задача создана!*\n{cat_label} {task_text}\n⏰ {remind_at.strftime('%d.%m.%Y в %H:%M')}",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_menu_kb(),
     )
     await state.clear()
 
 
-# ─── Inline: Время намазов ───
+# ─── Inline: Время намазов + переключатель ───
 @router.callback_query(F.data == "prayer_times")
 async def cb_prayer_times(cb: CallbackQuery):
     user = await get_user(cb.from_user.id)
@@ -394,8 +468,31 @@ async def cb_prayer_times(cb: CallbackQuery):
         await register_user(cb.from_user.id)
         user = await get_user(cb.from_user.id)
     msg = await get_prayer_message(user["latitude"], user["longitude"], user["city"])
-    await cb.message.edit_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=BACK_KB)
+    kb = await prayer_times_kb(user)
+    await cb.message.edit_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     await cb.answer()
+
+
+# ─── Inline: Переключить уведомления намазов (внутри экрана намазов) ───
+@router.callback_query(F.data == "toggle_prayer")
+async def cb_toggle_prayer(cb: CallbackQuery):
+    user = await get_user(cb.from_user.id)
+    new_state = not user.get("prayer_notifications")
+    await set_prayer_notifications(cb.from_user.id, new_state)
+    if new_state:
+        await schedule_prayer_for_user(user)
+    else:
+        today = date.today().isoformat()
+        for ru_name in ["Фаджр", "Зухр", "Аср", "Магриб", "Иша"]:
+            job_id = f"prayer_{cb.from_user.id}_{ru_name}_{today}"
+            if scheduler.get_job(job_id):
+                scheduler.remove_job(job_id)
+    user = await get_user(cb.from_user.id)
+    msg = await get_prayer_message(user["latitude"], user["longitude"], user["city"])
+    kb = await prayer_times_kb(user)
+    await cb.message.edit_text(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
+    status = "включены ✅" if new_state else "выключены ⏸"
+    await cb.answer(f"🕌 Уведомления {status}")
 
 
 # ─── Inline: Выбор города ───
@@ -410,10 +507,7 @@ async def cb_set_city(cb: CallbackQuery):
 async def cb_city_selected(cb: CallbackQuery, state: FSMContext):
     city_name = cb.data.split("_", 1)[1]
     if city_name == "custom":
-        await cb.message.edit_text(
-            "✏ Напиши название города:",
-            reply_markup=BACK_KB,
-        )
+        await cb.message.edit_text("✏ Напиши название города:", reply_markup=BACK_KB)
         await state.update_data(awaiting_city=True)
         await state.set_state(TaskStates.waiting_city)
         await cb.answer()
@@ -455,11 +549,7 @@ async def cb_today_plan(cb: CallbackQuery):
     user = await get_user(cb.from_user.id)
     city = user.get("city", "Москва") if user else "Москва"
     if not tasks:
-        await cb.message.edit_text(
-            f"📅 На сегодня задач нет.\n\n"
-            f"🕌 Намазы: /prayer",
-            reply_markup=BACK_KB,
-        )
+        await cb.message.edit_text(f"📅 На сегодня задач нет.\n\n🕌 Намазы: /prayer", reply_markup=BACK_KB)
         await cb.answer()
         return
     lines = [f"📅 *План на сегодня ({city}):*\n"]
@@ -476,43 +566,6 @@ async def cb_today_plan(cb: CallbackQuery):
 async def cb_clear_done(cb: CallbackQuery):
     count = await delete_all_done(cb.from_user.id)
     await cb.answer(f"🗑 Удалено: {count}", show_alert=True)
-
-
-# ─── Inline: Настройки ───
-@router.callback_query(F.data == "settings")
-async def cb_settings(cb: CallbackQuery):
-    user = await get_user(cb.from_user.id)
-    if not user:
-        await register_user(cb.from_user.id)
-        user = await get_user(cb.from_user.id)
-    await cb.message.edit_text("⚙ *Настройки:*", parse_mode=ParseMode.MARKDOWN, reply_markup=settings_kb(user))
-    await cb.answer()
-
-
-# ─── Inline: Переключить намазы ───
-@router.callback_query(F.data == "toggle_prayer")
-async def cb_toggle_prayer(cb: CallbackQuery):
-    user = await get_user(cb.from_user.id)
-    new_state = not user.get("prayer_notifications")
-    await set_prayer_notifications(cb.from_user.id, new_state)
-    if new_state:
-        await schedule_prayer_for_user(user)
-    user = await get_user(cb.from_user.id)
-    status = "включены" if new_state else "выключены"
-    await cb.answer(f"🕌 Уведомления о намазах {status}")
-    await cb.message.edit_reply_markup(reply_markup=settings_kb(user))
-
-
-# ─── Inline: Переключить сводку ───
-@router.callback_query(F.data == "toggle_daily")
-async def cb_toggle_daily(cb: CallbackQuery):
-    user = await get_user(cb.from_user.id)
-    new_state = not user.get("daily_summary")
-    await set_daily_summary(cb.from_user.id, new_state)
-    user = await get_user(cb.from_user.id)
-    status = "включена" if new_state else "выключена"
-    await cb.answer(f"📅 Утренняя сводка {status}")
-    await cb.message.edit_reply_markup(reply_markup=settings_kb(user))
 
 
 # ─── /tasks ───
@@ -538,7 +591,8 @@ async def cmd_prayer(message: Message):
         await register_user(message.from_user.id)
         user = await get_user(message.from_user.id)
     msg = await get_prayer_message(user["latitude"], user["longitude"], user["city"])
-    await message.answer(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=BACK_KB)
+    kb = await prayer_times_kb(user)
+    await message.answer(msg, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
 
 # ─── /help ───
@@ -550,23 +604,21 @@ async def cmd_help(message: Message):
         "/tasks — задачи\n"
         "/prayer — намазы\n"
         "/help — помощь\n\n"
-        "✏️ *Создание задач:*\n"
-        "`29.06.2026 в 12:00 про зарплату`\n"
-        "`завтра в 15:00 позвонить`\n"
-        "`в 14:00 читать книгу`\n"
-        "`через 30 минут кофе`",
+        "🤖 Или просто напиши мне что нужно!",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=main_menu_kb(),
     )
 
 
-# ─── Свободный текст (не в FSM) ───
+# ─── Свободный текст → ИИ-агент ───
 @router.message(F.text)
 async def handle_free_text(message: Message, state: FSMContext):
     current_state = await state.get_state()
     if current_state:
         return
-    await create_task_from_message(message, message.text.strip())
+    await message.answer_chat_action("typing")
+    reply = await ask_ai(message.from_user.id, message.text.strip())
+    await message.answer(reply, reply_markup=main_menu_kb())
 
 
 async def on_startup():
