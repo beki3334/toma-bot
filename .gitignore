@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 tasks.db
+music_bot.db
 .env
 *.session
+temp_audio/
