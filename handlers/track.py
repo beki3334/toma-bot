@@ -81,22 +81,18 @@ async def cb_track_detail(cb: CallbackQuery):
 async def _download_track(track_id: int, track: dict) -> str | None:
     os.makedirs("temp_audio", exist_ok=True)
 
-    from deezer_stream import get_full_track_url, is_deezer_ready
-    if is_deezer_ready():
+    from deezer_stream import is_deezer_ready
+    from config import DEEZER_ARL
+    if is_deezer_ready() and DEEZER_ARL:
         import asyncio
-        stream_url = await asyncio.to_thread(get_full_track_url, track_id)
-        if stream_url:
-            try:
-                import httpx
-                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                    resp = await client.get(stream_url)
-                    if resp.status_code == 200 and len(resp.content) > 50000:
-                        path = f"temp_audio/{track_id}_full.mp3"
-                        with open(path, "wb") as f:
-                            f.write(resp.content)
-                        return path
-            except Exception as e:
-                logger.error(f"Full track download error: {e}")
+        path = f"temp_audio/{track_id}_full.mp3"
+        try:
+            from deezer_decrypt import download_and_decrypt
+            ok = await asyncio.to_thread(download_and_decrypt, track_id, DEEZER_ARL, path)
+            if ok and os.path.exists(path) and os.path.getsize(path) > 50000:
+                return path
+        except Exception as e:
+            logger.error(f"Decrypted download error: {e}")
 
     preview = track.get("preview")
     if preview:
