@@ -263,22 +263,39 @@ async def cb_album_from_track(cb: CallbackQuery):
 async def cb_back_from_track(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     from handlers.search import search_cache
+    is_photo = cb.message.photo or (cb.message.caption and not cb.message.text)
+
     cache = search_cache.get(cb.from_user.id)
     if cache and cache.get("results"):
         from keyboards import search_results_kb
-        lang = (await get_user(cb.from_user.id) or {}).get("language", "ru")
         text = f"🔍 <b>Результаты поиска:</b>\n\nЗапрос: <i>{cache['query']}</i>"
-        await cb.message.edit_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=search_results_kb(cache["results"], cache["type"], page=0),
-        )
+        if is_photo:
+            await cb.message.delete()
+            await cb.message.answer(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=search_results_kb(cache["results"], cache["type"], page=0),
+            )
+        else:
+            await cb.message.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=search_results_kb(cache["results"], cache["type"], page=0),
+            )
     else:
         from keyboards import main_menu_kb
         lang = (await get_user(cb.from_user.id) or {}).get("language", "ru")
-        await cb.message.edit_text(
-            t(cb.from_user.id, "main_menu", lang),
-            parse_mode=ParseMode.HTML,
-            reply_markup=main_menu_kb(),
-        )
+        if is_photo:
+            await cb.message.delete()
+            await cb.message.answer(
+                t(cb.from_user.id, "main_menu", lang),
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_menu_kb(),
+            )
+        else:
+            await cb.message.edit_text(
+                t(cb.from_user.id, "main_menu", lang),
+                parse_mode=ParseMode.HTML,
+                reply_markup=main_menu_kb(),
+            )
     await cb.answer()

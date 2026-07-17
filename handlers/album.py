@@ -121,9 +121,18 @@ async def cb_back_from_album(cb: CallbackQuery):
     from keyboards import main_menu_kb
     lang = (await get_user(cb.from_user.id) or {}).get("language", "ru")
     from translations import t as tr
-    await cb.message.edit_text(
-        tr(cb.from_user.id, "main_menu", lang),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(),
-    )
+    is_photo = cb.message.photo or (cb.message.caption and not cb.message.text)
+    if is_photo:
+        await cb.message.delete()
+        await cb.message.answer(
+            tr(cb.from_user.id, "main_menu", lang),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_kb(),
+        )
+    else:
+        await cb.message.edit_text(
+            tr(cb.from_user.id, "main_menu", lang),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_kb(),
+        )
     await cb.answer()
