@@ -1,6 +1,7 @@
 import logging
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
+from aiogram.types import ErrorEvent
 
 from config import BOT_TOKEN, PROXY_URL, DEEZER_ARL
 from database import init_db
@@ -23,6 +24,15 @@ async def on_startup():
         logger.warning("No DEEZER_ARL set - using 30s previews only")
 
 
+async def on_error(event: ErrorEvent):
+    logger.error(f"Handler error: {event.exception}", exc_info=True)
+    try:
+        if event.update.callback_query:
+            await event.update.callback_query.answer("⚠️ Произошла ошибка", show_alert=True)
+    except Exception:
+        pass
+
+
 async def main():
     global bot
     if PROXY_URL:
@@ -38,6 +48,7 @@ async def main():
     for router in all_routers:
         dp.include_router(router)
 
+    dp.error.register(on_error)
     dp.startup.register(on_startup)
     logger.info("Music bot starting...")
     await dp.start_polling(bot)

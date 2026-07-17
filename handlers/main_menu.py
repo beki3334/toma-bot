@@ -28,11 +28,20 @@ async def cmd_start(message: Message, state: FSMContext):
 async def cb_main_menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     lang = (await get_user(cb.from_user.id) or {}).get("language", "ru")
-    await cb.message.edit_text(
-        t(cb.from_user.id, "main_menu", lang),
-        parse_mode=ParseMode.HTML,
-        reply_markup=main_menu_kb(),
-    )
+    is_photo = cb.message.photo or (cb.message.caption and not cb.message.text)
+    if is_photo:
+        await cb.message.delete()
+        await cb.message.answer(
+            t(cb.from_user.id, "main_menu", lang),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_kb(),
+        )
+    else:
+        await cb.message.edit_text(
+            t(cb.from_user.id, "main_menu", lang),
+            parse_mode=ParseMode.HTML,
+            reply_markup=main_menu_kb(),
+        )
     await cb.answer()
 
 
