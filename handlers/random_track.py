@@ -4,24 +4,30 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from aiogram.enums import ParseMode
 
 from database import get_user, get_listen_history, get_favorites
-from deezer_api import get_chart, search_tracks, get_cover_url, format_duration, get_track
+from deezer_api import get_chart, search_tracks, get_cover_url, format_duration
 from translations import t
 
 router = Router()
 
-random_queries = [
-    ("Eminem", "en"), ("Drake", "en"), ("The Weeknd", "en"),
-    ("Billie Eilish", "en"), ("Adele", "en"), ("Ed Sheeran", "en"),
-    ("Taylor Swift", "en"), ("Bruno Mars", "en"), ("Post Malone", "en"),
-    ("Daft Punk", "en"), ("Arctic Monkeys", "en"), ("Imagine Dragons", "en"),
-    ("Rihanna", "en"), ("Beyonce", "en"), ("Kendrick Lamar", "en"),
-    ("The Weeknd", "en"), ("SZA", "en"), ("Dua Lipa", "en"),
-    ("Мумий Тролль", "ru"), ("Земфира", "ru"), ("Баста", "ru"),
-    ("Скриптонит", "ru"), ("Кино", "ru"), ("Oxxxymiron", "ru"),
-    ("Noize MC", "ru"), ("Звонкий", "ru"), ("Мот", "ru"),
-    ("Rauf & Faik", "ru"), ("Jah Khalib", "ru"),
-    ("Shazam", "tr"), ("Måneskin", "it"), ("Rosalía", "es"),
-    ("Blackpink", "ko"), ("BTS", "ko"), ("Bad Bunny", "es"),
+central_asian_artists = [
+    "Rustam Azimi", "Bahrom Gafuri", "Shabnami Surayo",
+    "Shabnam Surayo", "Bakhtiyor Ibrohimov", "Farhod Oripov",
+    "Daler Ruz", "Otabek Mutalibov", "Sherali Jo'rayev",
+    "Yulduz Usmonova", "Sardor Rahimhon", "Ozoda Nursaidova",
+    "Nilufar Usmonova", "Shahzoda", "Rayhon",
+]
+
+western_artists = [
+    "Eminem", "Drake", "The Weeknd", "Billie Eilish",
+    "Adele", "Ed Sheeran", "Taylor Swift", "Bruno Mars",
+    "Post Malone", "Daft Punk", "Arctic Monkeys",
+    "Imagine Dragons", "Rihanna", "Beyonce", "SZA", "Dua Lipa",
+]
+
+russian_artists = [
+    "Мумий Тролль", "Земфира", "Баста", "Скриптонит",
+    "Кино", "Oxxxymiron", "Noize MC", "Rauf & Faik",
+    "Jah Khalib", "Мот", "Звонкий",
 ]
 
 
@@ -32,18 +38,21 @@ async def cb_random_track(cb: CallbackQuery):
     history = await get_listen_history(user_id, limit=20)
     listened_ids = {h["track_id"] for h in history}
 
-    favs = await get_favorites(user_id, limit=20)
-    fav_ids = {f["track_id"] for f in favs}
-
     all_tracks = []
 
-    chart = await get_chart(limit=25)
+    chart = await get_chart(limit=15)
     if chart:
         all_tracks.extend(chart)
 
-    selected_artists = random.sample(random_queries, min(4, len(random_queries)))
-    for artist_name, lang in selected_artists:
-        tracks = await search_tracks(artist_name, limit=5)
+    sample_artists = (
+        random.sample(central_asian_artists, 3) +
+        random.sample(western_artists, 2) +
+        random.sample(russian_artists, 2)
+    )
+    random.shuffle(sample_artists)
+
+    for artist in sample_artists[:6]:
+        tracks = await search_tracks(artist, limit=5)
         if tracks:
             all_tracks.extend(tracks)
 
@@ -58,20 +67,13 @@ async def cb_random_track(cb: CallbackQuery):
     if len(unlistened) < 5:
         unlistened = all_tracks
 
-    preferred = [t for t in unlistened if t["id"] in fav_ids]
-    if len(preferred) >= 3:
-        pool = preferred
-    else:
-        pool = unlistened
+    random.shuffle(unlistened)
+    selected = unlistened[:5]
 
-    random.shuffle(pool)
-    selected = pool[:5]
-
-    text = "🎲 <b>Случайные треки</b>\n\nВыбери что послушать:\n"
     buttons = []
     for i, track in enumerate(selected, 1):
-        title = track.get("title", "?")[:28]
-        artist = track.get("artist", {}).get("name", "?")[:20]
+        title = track.get("title", "?")[:25]
+        artist = track.get("artist", {}).get("name", "?")[:18]
         dur = format_duration(track.get("duration", 0))
         buttons.append([InlineKeyboardButton(
             text=f"{i}. {title} — {artist} ({dur})",
@@ -81,15 +83,13 @@ async def cb_random_track(cb: CallbackQuery):
     buttons.append([InlineKeyboardButton(text="🔙 Меню", callback_data="main_menu")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
 
+    text = "🎲 <b>Случайные треки</b>\n\nТаджикская, узбекская и мировая музыка:\n"
     cover = get_cover_url(selected[0]) if selected else None
     if cover:
         try:
             await cb.message.delete()
             await cb.message.answer_photo(
-                cover,
-                caption=text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=kb,
+                cover, caption=text, parse_mode=ParseMode.HTML, reply_markup=kb,
             )
             await cb.answer()
             return

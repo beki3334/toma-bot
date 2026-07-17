@@ -146,23 +146,44 @@ async def handle_search_query(message: Message, state: FSMContext):
     user_id = message.from_user.id
     results = []
 
+    from tajik_artists import get_search_variants
+
     if search_type == "artist":
-        artists = await search_artists(query, limit=3)
-        if artists:
-            artist = artists[0]
-            artist_id = artist["id"]
-            artist_name = artist.get("name", "?")
-            top_tracks = await get_artist_top_tracks(artist_id, limit=50)
-            if top_tracks:
-                results = top_tracks
-                text = f"👤 <b>{artist_name}</b>\n\nТоп треков: {len(results)}"
-            else:
-                text = f"👤 <b>{artist_name}</b> — треков не найдено"
+        variants = get_search_variants(query)
+        best_artist = None
+        best_tracks = []
+
+        for variant in variants:
+            artists = await search_artists(variant, limit=3)
+            if artists:
+                for artist in artists:
+                    tracks = await get_artist_top_tracks(artist["id"], limit=50)
+                    if tracks and len(tracks) > len(best_tracks):
+                        best_artist = artist
+                        best_tracks = tracks
+                if best_tracks:
+                    break
+
+        if best_artist and best_tracks:
+            results = best_tracks
+            text = f"👤 <b>{best_artist['name']}</b>\n\nТоп треков: {len(results)}"
         else:
-            text = f"😔 Исполнитель «{query}» не найден"
+            text = f"😔 «{query}» не найден"
+
     elif search_type == "track":
-        results = await search_tracks(query, limit=50)
+        variants = get_search_variants(query)
+        all_results = []
+        for variant in variants:
+            r = await search_tracks(variant, limit=25)
+            all_results.extend(r)
+        seen_ids = set()
+        results = []
+        for t in all_results:
+            if t["id"] not in seen_ids:
+                seen_ids.add(t["id"])
+                results.append(t)
         text = f"🔍 Найдено треков: {len(results)}"
+
     elif search_type == "album":
         results = await search_albums(query, limit=50)
         text = f"🔍 Найдено альбомов: {len(results)}"
