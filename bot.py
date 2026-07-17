@@ -2,7 +2,7 @@ import logging
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 
-from config import BOT_TOKEN, PROXY_URL
+from config import BOT_TOKEN, PROXY_URL, DEEZER_ARL
 from database import init_db
 from handlers import all_routers
 
@@ -15,6 +15,12 @@ bot: Bot = None
 async def on_startup():
     await init_db()
     logger.info("Database initialized!")
+    if DEEZER_ARL:
+        from deezer_stream import init_deezer
+        init_deezer(DEEZER_ARL)
+        logger.info("Deezer full track streaming enabled!")
+    else:
+        logger.warning("No DEEZER_ARL set - using 30s previews only")
 
 
 async def main():

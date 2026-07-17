@@ -9,7 +9,7 @@ from database import (
     rename_playlist, get_playlist_tracks, add_track_to_playlist,
     remove_track_from_playlist, get_playlist_track_count,
 )
-from deezer import get_track, format_duration, get_cover_url
+from deezer_api import get_track, format_duration, get_cover_url
 from keyboards import (
     playlists_kb, playlist_detail_kb, playlist_tracks_kb,
     add_to_playlist_choice_kb, BACK_KB,

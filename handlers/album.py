@@ -3,7 +3,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardBut
 from aiogram.enums import ParseMode
 
 from database import get_user, get_playlists, add_track_to_playlist
-from deezer import get_album, get_album_tracks, get_cover_url, format_duration
+from deezer_api import get_album, get_album_tracks, get_cover_url, format_duration
 from keyboards import album_kb, BACK_KB
 from translations import t
 

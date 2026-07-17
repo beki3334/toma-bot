@@ -3,7 +3,7 @@ from aiogram.types import CallbackQuery
 from aiogram.enums import ParseMode
 
 from database import get_user
-from deezer import get_artist, get_artist_top_tracks, get_artist_albums, get_cover_url, format_duration
+from deezer_api import get_artist, get_artist_top_tracks, get_artist_albums, get_cover_url, format_duration
 from keyboards import artist_kb, BACK_KB
 from translations import t
 

@@ -5,3 +5,10 @@ music_bot.db
 .env
 *.session
 temp_audio/
+temp_ar/
+node_modules/
+package-lock.json
+package.json
+test_*.py
+test_*.js
+get_arl.*

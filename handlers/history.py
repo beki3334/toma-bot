@@ -95,7 +95,7 @@ async def cb_repeat_search(cb: CallbackQuery):
 
     if search_type in ("track", "artist", "album"):
         from handlers.search import search_cache, SearchStates
-        from deezer import search_tracks, search_artists, search_albums
+        from deezer_api import search_tracks, search_artists, search_albums
         from keyboards import search_results_kb
 
         if search_type == "track":

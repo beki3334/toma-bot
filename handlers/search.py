@@ -10,7 +10,7 @@ from database import (
 from keyboards import (
     search_menu_kb, search_results_kb, BACK_KB,
 )
-from deezer import (
+from deezer_api import (
     search_tracks, search_artists, search_albums,
     format_track_info, get_chart,
 )

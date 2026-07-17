@@ -4,7 +4,7 @@ from aiogram.types import CallbackQuery
 from aiogram.enums import ParseMode
 
 from database import get_user, get_listen_history, get_favorites
-from deezer import get_chart, search_tracks, get_cover_url, format_duration
+from deezer_api import get_chart, search_tracks, get_cover_url, format_duration
 from keyboards import track_actions_kb
 from translations import t
 

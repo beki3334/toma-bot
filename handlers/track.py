@@ -11,9 +11,9 @@ from database import (
     add_favorite, remove_favorite, is_favorite,
     get_playlists,
 )
-from deezer import get_track, format_track_info, get_cover_url, format_duration
+from deezer_api import get_track, format_track_info, get_cover_url, format_duration
 from keyboards import track_actions_kb, search_menu_kb, BACK_KB
-from youtube import download_audio, cleanup_temp
+from youtube import search_and_download, cleanup_temp
 from translations import t
 
 logger = logging.getLogger(__name__)
@@ -76,6 +76,42 @@ async def cb_track_detail(cb: CallbackQuery):
     await show_track_detail(cb, track_id, cb.from_user.id, edit=True)
 
 
+async def _download_track(track_id: int, track: dict) -> str | None:
+    os.makedirs("temp_audio", exist_ok=True)
+
+    from deezer_stream import get_full_track_url, is_deezer_ready
+    if is_deezer_ready():
+        stream_url = get_full_track_url(track_id)
+        if stream_url:
+            try:
+                import httpx
+                async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                    resp = await client.get(stream_url)
+                    if resp.status_code == 200 and len(resp.content) > 50000:
+                        path = f"temp_audio/{track_id}_full.mp3"
+                        with open(path, "wb") as f:
+                            f.write(resp.content)
+                        return path
+            except Exception as e:
+                logger.error(f"Full track download error: {e}")
+
+    preview = track.get("preview")
+    if preview:
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(preview)
+                if resp.status_code == 200:
+                    path = f"temp_audio/{track_id}_preview.mp3"
+                    with open(path, "wb") as f:
+                        f.write(resp.content)
+                    return path
+        except Exception as e:
+            logger.error(f"Preview download error: {e}")
+
+    return None
+
+
 @router.callback_query(F.data.startswith("play_"))
 async def cb_play_track(cb: CallbackQuery):
     track_id = int(cb.data.split("_")[1])
@@ -84,39 +120,36 @@ async def cb_play_track(cb: CallbackQuery):
         await cb.answer("Трек не найден", show_alert=True)
         return
 
-    preview = track.get("preview")
-    if not preview:
-        await cb.answer("Превью недоступно", show_alert=True)
-        return
-
     lang = (await get_user(cb.from_user.id) or {}).get("language", "ru")
     artist = track.get("artist", {}).get("name", "?")
     title = track.get("title", "?")
 
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(preview)
-            if resp.status_code == 200:
-                temp_path = f"temp_audio/{track_id}_preview.mp3"
-                os.makedirs("temp_audio", exist_ok=True)
-                with open(temp_path, "wb") as f:
-                    f.write(resp.content)
-                await cb.message.answer_audio(
-                    FSInputFile(temp_path),
-                    title=title,
-                    performer=artist,
-                    caption=f"▶️ {t(cb.from_user.id, 'playing', lang, title=title, artist=artist)}",
-                )
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-            else:
-                await cb.answer("Ошибка загрузки превью", show_alert=True)
-    except Exception as e:
-        logger.error(f"Play error: {e}")
-        await cb.answer("Ошибка воспроизведения", show_alert=True)
+    await cb.answer(t(cb.from_user.id, "processing", lang))
+    status_msg = await cb.message.answer(f"▶️ Загружаю: <b>{title}</b> — {artist}...", parse_mode=ParseMode.HTML)
+
+    file_path = await _download_track(track_id, track)
+    if file_path and os.path.exists(file_path):
+        try:
+            from deezer_stream import is_deezer_ready
+            is_full = is_deezer_ready() and os.path.getsize(file_path) > 500000
+            label = "Полный трек" if is_full else "Превью 30 сек"
+            await cb.message.answer_audio(
+                FSInputFile(file_path),
+                title=title,
+                performer=artist,
+                caption=f"🎵 {title} — {artist}\n\n▶️ {label}",
+            )
+            await status_msg.delete()
+        except Exception as e:
+            logger.error(f"Send audio error: {e}")
+            await status_msg.edit_text("❌ Ошибка отправки аудио.")
+        finally:
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+    else:
+        await status_msg.edit_text("❌ Трек недоступен.")
 
 
 @router.callback_query(F.data.startswith("download_"))
@@ -131,36 +164,32 @@ async def cb_download_track(cb: CallbackQuery):
     artist = track.get("artist", {}).get("name", "?")
     title = track.get("title", "?")
 
-    preview = track.get("preview")
-    if not preview:
-        await cb.answer("Аудио недоступно", show_alert=True)
-        return
-
     await cb.answer(t(cb.from_user.id, "processing", lang))
-    try:
-        import httpx
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(preview)
-            if resp.status_code == 200:
-                temp_path = f"temp_audio/{track_id}_download.mp3"
-                os.makedirs("temp_audio", exist_ok=True)
-                with open(temp_path, "wb") as f:
-                    f.write(resp.content)
-                await cb.message.answer_audio(
-                    FSInputFile(temp_path),
-                    title=title,
-                    performer=artist,
-                    caption=f"📥 {title} — {artist}\n\n⚠️ 30-секундное превью (Deezer)",
-                )
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-            else:
-                await cb.message.answer(t(cb.from_user.id, "download_error", lang))
-    except Exception as e:
-        logger.error(f"Download error: {e}")
-        await cb.message.answer(t(cb.from_user.id, "download_error", lang))
+    status_msg = await cb.message.answer(f"📥 Скачиваю: <b>{title}</b> — {artist}...", parse_mode=ParseMode.HTML)
+
+    file_path = await _download_track(track_id, track)
+    if file_path and os.path.exists(file_path):
+        try:
+            from deezer_stream import is_deezer_ready
+            is_full = is_deezer_ready() and os.path.getsize(file_path) > 500000
+            label = "Полный трек" if is_full else "Превью 30 сек"
+            await cb.message.answer_audio(
+                FSInputFile(file_path),
+                title=title,
+                performer=artist,
+                caption=f"📥 {title} — {artist}\n\n{label}",
+            )
+            await status_msg.delete()
+        except Exception as e:
+            logger.error(f"Send download error: {e}")
+            await status_msg.edit_text("❌ Ошибка отправки.")
+        finally:
+            try:
+                os.remove(file_path)
+            except Exception:
+                pass
+    else:
+        await status_msg.edit_text("❌ Трек недоступен.")
 
 
 @router.callback_query(F.data.startswith("fav_"))
