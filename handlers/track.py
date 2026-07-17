@@ -135,7 +135,12 @@ async def cb_play_track(cb: CallbackQuery):
         try:
             from deezer_stream import is_deezer_ready
             is_full = is_deezer_ready() and os.path.getsize(file_path) > 500000
-            label = "Полный трек" if is_full else "Превью 30 сек"
+            size_kb = os.path.getsize(file_path) // 1024
+            if is_full:
+                quality = "320 kbps" if size_kb > 3000 else "128 kbps"
+                label = f"Полный трек • {quality}"
+            else:
+                label = "Превью 30 сек"
             await cb.message.answer_audio(
                 FSInputFile(file_path),
                 title=title,

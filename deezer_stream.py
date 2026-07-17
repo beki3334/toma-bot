@@ -44,12 +44,15 @@ def get_full_track_url(track_id: int) -> str | None:
             return None
 
         headers = _dz_instance.http_headers
+        can_hq = _dz_instance.current_user.get("can_stream_hq", False)
+        audio_format = "MP3_320" if can_hq else "MP3_128"
+
         payload = {
             "license_token": license_token,
             "media": [{
                 "type": "FULL",
                 "formats": [
-                    {"cipher": "BF_CBC_STRIPE", "format": "MP3_128"}
+                    {"cipher": "BF_CBC_STRIPE", "format": audio_format}
                 ]
             }],
             "track_tokens": [track_token]

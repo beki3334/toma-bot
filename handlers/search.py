@@ -1,5 +1,5 @@
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.enums import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -12,7 +12,8 @@ from keyboards import (
 )
 from deezer_api import (
     search_tracks, search_artists, search_albums,
-    format_track_info, get_chart,
+    get_artist_top_tracks, get_artist, format_track_info, get_chart,
+    format_duration,
 )
 from translations import t
 
@@ -26,6 +27,36 @@ class SearchStates(StatesGroup):
 
 
 search_cache = {}
+RESULTS_PER_PAGE = 10
+
+
+def _tracks_kb(results: list, page: int = 0) -> InlineKeyboardMarkup:
+    start = page * RESULTS_PER_PAGE
+    end = start + RESULTS_PER_PAGE
+    page_items = results[start:end]
+    buttons = []
+    for i, item in enumerate(page_items):
+        pos = start + i + 1
+        title = item.get("title", "?")[:25]
+        artist = item.get("artist", {}).get("name", "?")[:18]
+        dur = format_duration(item.get("duration", 0))
+        buttons.append([InlineKeyboardButton(
+            text=f"{pos}. {title} — {artist} ({dur})",
+            callback_data=f"track_{item['id']}"
+        )])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"spage_{page - 1}"))
+    total_pages = (len(results) + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    if end < len(results):
+        nav.append(InlineKeyboardButton(text="Ещё ➡️", callback_data=f"spage_{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="🔄 Новый поиск", callback_data="search_menu")])
+    buttons.append([InlineKeyboardButton(text="🔙 Меню", callback_data="main_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 @router.callback_query(F.data == "search_menu")
@@ -57,7 +88,7 @@ async def cb_search_track(cb: CallbackQuery, state: FSMContext):
 async def cb_search_artist(cb: CallbackQuery, state: FSMContext):
     lang = (await get_user(cb.from_user.id) or {}).get("language", "ru")
     await cb.message.edit_text(
-        t(cb.from_user.id, "enter_query", lang),
+        "👤 Введи имя исполнителя:",
         parse_mode=ParseMode.HTML,
         reply_markup=BACK_KB,
     )
@@ -113,34 +144,48 @@ async def handle_search_query(message: Message, state: FSMContext):
         return
 
     user_id = message.from_user.id
-    if search_type == "track":
-        results = await search_tracks(query)
-    elif search_type == "artist":
-        results = await search_artists(query)
-    elif search_type == "album":
-        results = await search_albums(query)
-    else:
-        results = await search_tracks(query)
+    results = []
 
-    search_cache[user_id] = {"results": results, "type": search_type, "query": query}
+    if search_type == "artist":
+        artists = await search_artists(query, limit=3)
+        if artists:
+            artist = artists[0]
+            artist_id = artist["id"]
+            artist_name = artist.get("name", "?")
+            top_tracks = await get_artist_top_tracks(artist_id, limit=50)
+            if top_tracks:
+                results = top_tracks
+                text = f"👤 <b>{artist_name}</b>\n\nТоп треков: {len(results)}"
+            else:
+                text = f"👤 <b>{artist_name}</b> — треков не найдено"
+        else:
+            text = f"😔 Исполнитель «{query}» не найден"
+    elif search_type == "track":
+        results = await search_tracks(query, limit=50)
+        text = f"🔍 Найдено треков: {len(results)}"
+    elif search_type == "album":
+        results = await search_albums(query, limit=50)
+        text = f"🔍 Найдено альбомов: {len(results)}"
+    else:
+        results = await search_tracks(query, limit=50)
+        text = f"🔍 Найдено: {len(results)}"
+
+    search_cache[user_id] = {"results": results, "type": "track", "query": query, "page": 0}
     await add_search_history(user_id, query, search_type, len(results))
 
-    lang = (await get_user(user_id) or {}).get("language", "ru")
     if not results:
         await message.answer(
-            t(user_id, "no_results", lang, query=query),
+            text,
             parse_mode=ParseMode.HTML,
             reply_markup=search_menu_kb(),
         )
         await state.clear()
         return
 
-    text = f"🔍 <b>{t(user_id, 'search_results', lang)}</b>\n\n"
-    text += f"Запрос: <i>{query}</i> — найдено: {len(results)}"
     await message.answer(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=search_results_kb(results, search_type, page=0),
+        reply_markup=_tracks_kb(results, page=0),
     )
     await state.clear()
 
@@ -150,15 +195,14 @@ async def handle_genre_query(message: Message, state: FSMContext):
     query = message.text.strip()
     if not query:
         return
-    results = await search_tracks(query)
+    results = await search_tracks(query, limit=50)
     user_id = message.from_user.id
-    search_cache[user_id] = {"results": results, "type": "track", "query": query}
+    search_cache[user_id] = {"results": results, "type": "track", "query": query, "page": 0}
     await add_search_history(user_id, f"genre:{query}", "genre", len(results))
 
-    lang = (await get_user(user_id) or {}).get("language", "ru")
     if not results:
         await message.answer(
-            t(user_id, "no_results", lang, query=query),
+            f"🎸 Жанр «{query}» — ничего не найдено",
             parse_mode=ParseMode.HTML,
             reply_markup=search_menu_kb(),
         )
@@ -169,7 +213,7 @@ async def handle_genre_query(message: Message, state: FSMContext):
     await message.answer(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=search_results_kb(results, "track", page=0),
+        reply_markup=_tracks_kb(results, page=0),
     )
     await state.clear()
 
@@ -179,49 +223,66 @@ async def handle_lyrics_search(message: Message, state: FSMContext):
     query = message.text.strip()
     if not query:
         return
-    results = await search_tracks(query)
+    results = await search_tracks(query, limit=50)
     user_id = message.from_user.id
-    search_cache[user_id] = {"results": results, "type": "track", "query": query}
+    search_cache[user_id] = {"results": results, "type": "track", "query": query, "page": 0}
     await add_search_history(user_id, f"lyrics:{query}", "lyrics", len(results))
 
-    lang = (await get_user(user_id) or {}).get("language", "ru")
     if not results:
         await message.answer(
-            t(user_id, "no_results", lang, query=query),
+            f"📝 По тексту «{query}» — ничего не найдено",
             parse_mode=ParseMode.HTML,
             reply_markup=search_menu_kb(),
         )
         await state.clear()
         return
 
-    text = f"📝 <b>Поиск по тексту: {query}</b>\n\n"
-    text += "Выберите трек и нажмите 📝 Текст песни\n\n"
-    text += f"Найдено: {len(results)}"
+    text = f"📝 <b>По тексту: {query}</b>\n\nВыбери трек → нажми 📝 Текст\n\nНайдено: {len(results)}"
     await message.answer(
         text,
         parse_mode=ParseMode.HTML,
-        reply_markup=search_results_kb(results, "track", page=0),
+        reply_markup=_tracks_kb(results, page=0),
     )
     await state.clear()
 
 
-@router.callback_query(F.data.startswith("search_page_"))
+@router.callback_query(F.data.startswith("spage_"))
 async def cb_search_page(cb: CallbackQuery):
+    page = int(cb.data.split("_")[1])
+    user_id = cb.from_user.id
+    cache = search_cache.get(user_id)
+    if not cache:
+        await cb.answer("Кэш истёк. Сделайте новый поиск.", show_alert=True)
+        return
+    results = cache["results"]
+    total = len(results)
+    start = page * RESULTS_PER_PAGE + 1
+    end = min((page + 1) * RESULTS_PER_PAGE, total)
+    await cb.message.edit_text(
+        f"🔍 Результаты: {start}-{end} из {total}",
+        parse_mode=ParseMode.HTML,
+        reply_markup=_tracks_kb(results, page),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("search_page_"))
+async def cb_search_page_old(cb: CallbackQuery):
     parts = cb.data.split("_")
     search_type = parts[2]
     page = int(parts[3])
     user_id = cb.from_user.id
     cache = search_cache.get(user_id)
-    if not cache or cache["type"] != search_type:
-        await cb.answer("Кэш истёк. Сделайте новый поиск.", show_alert=True)
+    if not cache:
+        await cb.answer("Кэш истёк.", show_alert=True)
         return
     results = cache["results"]
-    lang = (await get_user(user_id) or {}).get("language", "ru")
-    text = f"🔍 <b>{t(user_id, 'search_results', lang)}</b>\n\n"
-    text += f"Запрос: <i>{cache['query']}</i> — найдено: {len(results)}"
+    total = len(results)
+    start = page * RESULTS_PER_PAGE + 1
+    end = min((page + 1) * RESULTS_PER_PAGE, total)
     await cb.message.edit_text(
-        text,
+        f"🔍 Результаты: {start}-{end} из {total}",
         parse_mode=ParseMode.HTML,
-        reply_markup=search_results_kb(results, search_type, page),
+        reply_markup=_tracks_kb(results, page),
     )
     await cb.answer()
