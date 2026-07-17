@@ -34,10 +34,10 @@ async def show_track_detail(message_or_cb, track_id: int, user_id: int, edit: bo
             await message_or_cb.answer(text, reply_markup=BACK_KB)
         return
 
-    await add_listen_history(user_id, track)
-    in_fav = await is_favorite(user_id, track_id)
+    import asyncio
+    fav_task = asyncio.create_task(is_favorite(user_id, track_id))
+    hist_task = asyncio.create_task(add_listen_history(user_id, track))
 
-    lang = (await get_user(user_id) or {}).get("language", "ru")
     artist_name = track.get("artist", {}).get("name", "?")
     album_title = track.get("album", {}).get("title", "?")
     duration = format_duration(track.get("duration", 0))
@@ -49,8 +49,9 @@ async def show_track_detail(message_or_cb, track_id: int, user_id: int, edit: bo
         f"⏱ {duration}"
     )
     if track.get("explicit"):
-        text += "\n🔞 Explicit"
+        text += " 🔞"
 
+    in_fav = await fav_task
     kb = track_actions_kb(track_id, in_fav)
 
     if edit:
@@ -60,6 +61,7 @@ async def show_track_detail(message_or_cb, track_id: int, user_id: int, edit: bo
         if cover:
             try:
                 await message_or_cb.answer_photo(cover, caption=text, parse_mode=ParseMode.HTML, reply_markup=kb)
+                await hist_task
                 return
             except Exception:
                 pass
@@ -81,11 +83,12 @@ async def _download_track(track_id: int, track: dict) -> str | None:
 
     from deezer_stream import get_full_track_url, is_deezer_ready
     if is_deezer_ready():
-        stream_url = get_full_track_url(track_id)
+        import asyncio
+        stream_url = await asyncio.to_thread(get_full_track_url, track_id)
         if stream_url:
             try:
                 import httpx
-                async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
                     resp = await client.get(stream_url)
                     if resp.status_code == 200 and len(resp.content) > 50000:
                         path = f"temp_audio/{track_id}_full.mp3"

@@ -1,11 +1,14 @@
 import deezer as deezer_lib
 import requests
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
 _dz_instance = None
 _arl = None
+_url_cache = {}
+_cache_ttl = 300  # 5 minutes
 
 
 def init_deezer(arl: str):
@@ -18,6 +21,11 @@ def init_deezer(arl: str):
 
 def get_full_track_url(track_id: int) -> str | None:
     global _dz_instance
+
+    cached = _url_cache.get(track_id)
+    if cached and time.time() - cached["time"] < _cache_ttl:
+        return cached["url"]
+
     if not _dz_instance or not _dz_instance.logged_in:
         return None
 
@@ -50,7 +58,7 @@ def get_full_track_url(track_id: int) -> str | None:
             "https://media.deezer.com/v1/get_url",
             json=payload,
             headers=headers,
-            timeout=15
+            timeout=10
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -59,7 +67,10 @@ def get_full_track_url(track_id: int) -> str | None:
             if media_list:
                 sources = media_list[0].get("sources", [])
                 if sources:
-                    return sources[0].get("url")
+                    url = sources[0].get("url")
+                    if url:
+                        _url_cache[track_id] = {"url": url, "time": time.time()}
+                    return url
         return None
     except Exception as e:
         logger.error(f"Get full track URL error: {e}")
